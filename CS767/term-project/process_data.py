@@ -18,6 +18,12 @@ def load_file(filename, read_by_line = False):
     file.close()
     return content  
 
+#padding for model input 
+def pad_sentence_batch(sentence_batch, word_to_int):
+    max_sentence_length = max([len(sentence) for sentence in sentence_batch])
+    return [sentence + [word_to_int['<PAD>']]*(max_sentence_length - len(sentence)) for sentence in sentence_batch]
+
+
 #load num stories in a directory
 def load_stories(directory, num=10):
     stories = list()
@@ -43,13 +49,27 @@ def load_stories(directory, num=10):
         clean_stories.append(story)
         clean_summaries.append(highlights)
 
-    word_to_int, int_to_word = build_vocab(clean_corpus)    
-    return clean_stories, clean_summaries, word_to_int, int_to_word   
-
-def convert_text_to_int(text, word_to_int):
+        word_count = get_word_count(clean_corpus)    
+    return clean_stories, clean_summaries, word_count    
+'''
+input is array of texts. each element is a document 
+output array of each text converted to an array of ints
+'''
+def convert_text_to_int(text, word_to_int, eos = False):
     int_text = []
-    for word in text.split():
-        int_text.append(word_to_int[word])
+
+    for sentence in text:
+        int_sentence = []
+        for word in sentence.split():
+            if word in word_to_int:
+                int_sentence.append(word_to_int[word])
+            else:
+                 int_sentence.append(word_to_int['<UNK>'])
+        
+        if eos:
+            int_sentence.append(word_to_int['<EOS>'])
+        
+        int_text.append(int_sentence)
     return int_text    
 
 #split a story into story and summary
@@ -80,24 +100,22 @@ def clean_text(text):
 #Create embedding matrix 
 #Based pre-trained model: ConceptNet NumberBatch https://github.com/commonsense/conceptnet-numberbatch
 """
-Input: list of filename 
-Output: word_to_int and int_to_word dictionaries
+Input: text corpus 
+Output:word_count 
 """
-def build_vocab(text):
+def get_word_count(text):
     
     words = text.split()
     counter = Counter(words)
+
 
     pairs = sorted(counter.items(), key=lambda x:(-x[1],x[0]))
 
     words, c = list(zip(*pairs))
 
-    word_to_int = dict(zip(words, range(len(words))))
-    word_to_int['<PAD>'] = len(word_to_int) # Add token to use for padding
-    word_to_int['<GO>'] = len(word_to_int) #token needed for training model decoder
-    int_to_word = dict(zip(word_to_int.values(), word_to_int.keys()))
+    word_count = dict(zip(words, range(len(words))))
 
-    return word_to_int, int_to_word
+    return word_count 
 
 
 """
@@ -116,16 +134,42 @@ def init_embedding_index(embedding_file = None):
             embedding_index[word] = np.asarray(values[1:], dtype='float32')
     return embedding_index        
 
-def build_embedding_matrix(word_to_int):
+
+"""
+Input: word_count, threshold 
+output: word_to_int, int_to_word, embedding_matrix
+"""
+def build_vocab(word_count, threshold=10):
 #create embedding_matrix 
-    embedding_matrix = np.asarray([len(word_to_int), 300]) # 300 because the trained model has 300 vectors perword
     
+    print('Initializing embedding matrix.')
+    embedding_index = init_embedding_index()
+    print('embedding matrix initialized')    
+    #create word_to_int 
+    special_tokens = ['<EOS>','<PAD>','<GO>','<UNK>']
+    word_to_int = {}
+
+    for token in special_tokens:
+        word_to_int[token]=len(word_to_int)
+    
+    print('Creating word_to_int')
+    for word, c in word_count.items():
+        if c > threshold or word in embedding_index:
+            word_to_int[word] = len(word_to_int)
+            
+            
+    embedding_matrix = np.zeros((len(word_to_int), 300),dtype=np.float32) # 300 because the trained model has 300 vectors perword
+
     for word, i in word_to_int.items():
         if word in embedding_index:
             embedding_matrix[i] = embedding_index[word]
         else:
-            embedding_matrix[i] = np.array(np.random.uniform(-2.0,1,300)) # give random encoding to word not in index   
-    return embedding_matrix         
+            embedding_vector = np.array(np.random.uniform(-2.0,1,300)) # give random encoding to word not in index
+            embedding_matrix[i] = embedding_vector    
+            embedding_index[word] = embedding_vector
+
+    int_to_word = dict(zip(word_to_int.values(), word_to_int.keys()))        
+    return embedding_matrix, word_to_int, int_to_word         
     
     
 
