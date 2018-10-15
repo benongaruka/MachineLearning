@@ -6,6 +6,8 @@ import argparse
 from os import listdir
 import numpy as np
 from collections import Counter
+from random import shuffle
+import pickle
 #This module provides helper functions for processing files for NN input
 
 #read a file and return text
@@ -25,7 +27,7 @@ def pad_sentence_batch(sentence_batch, word_to_int):
 
 
 #load num stories in a directory
-def load_stories(directory, num=10):
+def load_stories(directory,test = False, num=10):
     stories = list()
     print("Directory: " + directory)
     print("Number of files to process: " + str(num))
@@ -50,7 +52,25 @@ def load_stories(directory, num=10):
         clean_summaries.append(highlights)
 
         word_count = get_word_count(clean_corpus)    
-    return clean_stories, clean_summaries, word_count    
+
+        
+    #split for training and testing 80% 20% respectively
+    if not test:
+        print("Splitting into train test sets")
+        shuffle_list = list(zip(clean_stories, clean_summaries))
+        shuffle(shuffle_list)
+        x, y = zip(*shuffle_list)
+        x = list(x)
+        y = list(y)
+
+        split_idx = round(len(x)*0.8)
+        x_train = x[:split_idx]
+        y_train = y[:split_idx]
+        x_test = x[split_idx:]
+        y_test = y[split_idx:]
+        return x_train, y_train, x_test, y_test, word_count   
+    else:
+        return clean_stories, clean_summaries, word_count   
 '''
 input is array of texts. each element is a document 
 output array of each text converted to an array of ints
@@ -72,13 +92,29 @@ def convert_text_to_int(text, word_to_int, eos = False):
         int_text.append(int_sentence)
     return int_text    
 
+def convert_int_to_text(int_vals, int_to_word, pad):
+    texts = []
+
+    for i_sentence in int_vals:
+        texts.append(" ".join([int_to_word[i] for i in i_sentence if i != pad]))
+    return texts 
+
 #split a story into story and summary
 #each doc has a story and highlights tagged by @highlight token
-def split_story(doc):
+def split_story(doc, first_sentence=True):
     index = doc.find('@highlight')
-    story, highlights = doc[:index], doc[index:].split('@highlight')
-    highlights = [h.strip() for h in highlights if len(highlights)>0]
-    highlights = " ".join(highlights)
+    if first_sentence:
+        story, highlights = doc[:index].split('.')[:2], doc[index:].split('@highlight')
+        for h in highlights:
+            if len(h.strip())!=0:
+                highlights = h 
+                break
+        story = [s.strip() for s in story if len(story)>0]
+        story = " ".join(story)
+    else:    
+        story, highlights = doc[:index], doc[index:].split('@highlight')
+        highlights = [h.strip() for h in highlights if len(highlights)>0]
+        highlights = " ".join(highlights)
     return story, highlights
 
 #Clean the data
@@ -126,12 +162,17 @@ def init_embedding_index(embedding_file = None):
     embedding_index = {}
     if embedding_file == None:
         CN_path = './numberbatch-en.txt'
-    
-    with open(CN_path) as f:
-        for line in f:
-            values = line.split()
-            word = values[0] #first item is the word, followed by 300 dimension encoding
-            embedding_index[word] = np.asarray(values[1:], dtype='float32')
+    if os.path.exists('./embedding_index.pickle'):
+        with open('./embedding_index.pickle','rb') as handle:
+            embedding_index = pickle.load(handle)
+    else:        
+        with open(CN_path) as f:
+            for line in f:
+                values = line.split()
+                word = values[0] #first item is the word, followed by 300 dimension encoding
+                embedding_index[word] = np.asarray(values[1:], dtype='float32')
+            with open('./embedding_index.pickle', 'wb') as handle:
+                pickle.dump(embedding_index, handle, protocol = pickle.HIGHEST_PROTOCOL)
     return embedding_index        
 
 

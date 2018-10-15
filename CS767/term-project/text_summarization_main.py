@@ -14,6 +14,8 @@ import argparse
 import time 
 from tensorflow.layers import Dense
 import process_data as dh 
+import evaluation_helper as evalhelper
+import sys, getopt
 
 #model inputs for the model
 
@@ -138,7 +140,18 @@ def build_graph(vocab_to_int,embeddings, rnn_size, num_layers, batch_size):
         input_data, targets, learning_rate, keep_prob, summary_length, max_sentence_length, text_length = model_inputs()
 
         #Creating training and inference logits
-        training_logits, inference_logits = model(tf.reverse(input_data, [-1]), targets,embeddings, keep_prob,text_length, summary_length, max_sentence_length, len(vocab_to_int)+1, rnn_size, num_layers, vocab_to_int, batch_size)
+        training_logits, inference_logits = model(tf.reverse(input_data, [-1]), 
+                targets,
+                embeddings, 
+                keep_prob,
+                text_length, 
+                summary_length, 
+                max_sentence_length, 
+                len(vocab_to_int)+1, 
+                rnn_size, 
+                num_layers, 
+                vocab_to_int, 
+                batch_size)
         training_logits = tf.identity(training_logits.rnn_output, name='logits')
         inference_logits = tf.identity(inference_logits.sample_id, name='predictions')
 
@@ -149,6 +162,8 @@ def build_graph(vocab_to_int,embeddings, rnn_size, num_layers, batch_size):
         with tf.name_scope("optimization"):
             #loss function 
             cost = tf.contrib.seq2seq.sequence_loss(training_logits, targets, masks)
+
+            tf.summary.scalar('loss',cost)
             
             #Optimizer 
             optimizer = tf.train.AdamOptimizer(learning_rate)
@@ -160,97 +175,219 @@ def build_graph(vocab_to_int,embeddings, rnn_size, num_layers, batch_size):
 
             train_op = optimizer.apply_gradients(capped_gradients)
 
+            for index, grad in enumerate(capped_gradients):
+                tf.summary.histogram("{}-grad".format(capped_gradients[index][1].name), capped_gradients[index])
+            
             print('Building graph finished.')
+            merge_op = tf.summary.merge_all()
 
-    return train_graph, cost, train_op, input_data, targets, learning_rate, keep_prob, summary_length, max_sentence_length, text_length
+    return train_graph, cost, train_op, input_data, targets, learning_rate, keep_prob, summary_length, max_sentence_length, text_length, merge_op
 
-def main():
+def main(**kwargs):
     #assume we take arguments
-    #TODO: Add theses as user inputs
+    test_ = kwargs['Test']
+    file_loc = kwargs['file_loc']
+    num_ = kwargs['n']
+    if not test_:
+        batch_size = kwargs['batch_s']
+        epochs = kwargs['epoch_n']
     learning_rate_dacay = 0.95 
     min_learning_rate = 0.0005 
     display_step = 20
     stop_early = 0
-    stop = 3
+    stop = 100 
     per_epoch = 3
     rnn_size = 256
     num_layers = 2
-    batch_size = 1 
-    epochs = 80
     keep_probability = 0.75
     update_loss = 0
     batch_loss = 0
     summary_update_loss = []
     learning_rate = 0.005
 
-
     #get text
-    stories, summaries, word_count = dh.load_stories('../data/cnn/stories', num=500)
-    embeddings,word_to_int, int_to_word=dh.build_vocab(word_count)
-    clean_stories =dh.convert_text_to_int(stories, word_to_int, eos=True)
-    clean_summaries =dh.convert_text_to_int(summaries, word_to_int)
-    
-    update_check = (len(clean_stories)//batch_size//per_epoch)-1 
-    #Build graph
-    train_graph, cost_func, train_op, input_data, targets, lr, keep_prob, summary_length, max_sentence_length, text_length = build_graph(word_to_int, embeddings, rnn_size, num_layers, batch_size)
-
-    cwd = os.getcwd()
-    checkpoint =os.path.join(cwd,"best_model.ckpt")
-    
-
-    with tf.Session(graph = train_graph) as sess:
-        sess.run(tf.global_variables_initializer())
-
-        for epoch_i in range(1, epochs + 1):
-            for batch_i, (summaries_batch, texts_batch, summaries_lengths, texts_lengths) in enumerate(get_batches(clean_summaries, clean_stories,batch_size, word_to_int)):
-                start_time = time.time()
-                _, loss = sess.run([train_op, cost_func], 
-                        {input_data:texts_batch, 
-                            targets:summaries_batch, 
-                            lr:learning_rate,
-                            summary_length:summaries_lengths,
-                            text_length:texts_lengths,
-                            keep_prob:keep_probability})
+    if test_:
+        stories, summaries, word_count = dh.load_stories(file_loc, test = test_, num = num_)
+        embeddings,word_to_int, int_to_word=dh.build_vocab(word_count)
+        X_test = dh.convert_text_to_int(stories, word_to_int) # we don't need EOS, we will loop through these ourselves
+        Y_test = dh.convert_text_to_int(summaries, word_to_int)
         
-                batch_loss  += loss 
-                update_loss += loss
-                end_time = time.time()
-                batch_time = end_time - start_time
+        batch_size = 30 
+        #Create graph
+        train_graph, cost_func, train_op, input_data, targets, lr, keep_prob, summary_length, max_sentence_length, text_length,summary_op = build_graph(word_to_int, 
+                embeddings, rnn_size, num_layers, batch_size)
 
-                if batch_i & display_step == 0 and batch_i > 0:
-                    print('Epoch {:>3}/{} Batch {:>4}/{} - Loss: {:>6.3f}, Seconds: {:>4.2f})'.format(epoch_i, epochs, batch_i, len(clean_stories)//batch_size, batch_loss/display_step, batch_time*display_step))
-                    batch_loss = 0
-                
-                if batch_i & update_check == 0 and batch_i > 0:
-                    print("Average loss for this update:", round(update_loss/update_check,3))
-                    summary_update_loss.append(update_loss)
+        #Test model 
+        summary_lengths = []
+        for sentence in Y_test:
+            summary_lengths.append(len(sentence))
 
+        avg_summary_length = sum(summary_lengths)//len(summary_lengths)
+        y_sys = test_model(X_test, Y_test, './best_model.ckpt', train_graph,batch_size, avg_summary_length) # How do you test without knowing training batch_size
+        h_summaries = dh.convert_int_to_text(y_sys, int_to_word, word_to_int['<PAD>'])
+        rouge_scores = evalhelper.evaluate_rouge_score(h_summaries, summaries)
+        
+        for i in range(0, len(summaries)):
+            print('Auto summary: {}'.format(h_summaries[i]))
+            print()
+            print('Gold summary: {}'.format(summaries[i]))
+            print()
+        
+        print(rouge_scores)
 
-                    #Save minimums
-                    if update_loss <= min(summary_update_loss):
-                        print("New Record!")
-                        stop_early = 0
-                        saver = tf.train.Saver()
-                        saver.save(sess, checkpoint)
-                    else:
-                        print("No Improvement.")
-                        stop_early += 1
-                        if stop_early == stop:
-                            break 
+    else:
+        stories_train, summaries_train, stories_test, summaries_test, word_count= dh.load_stories(file_loc, num=num_)
+        embeddings,word_to_int, int_to_word=dh.build_vocab(word_count)
+        X_train =dh.convert_text_to_int(stories_train, word_to_int, eos=True)
+        Y_train =dh.convert_text_to_int(summaries_train, word_to_int)
+        X_test = dh.convert_text_to_int(stories_test, word_to_int) # we don't need EOS, we will loop through these ourselves
+        Y_test = dh.convert_text_to_int(summaries_test, word_to_int)
+        
+        update_check = (len(X_train)//batch_size//per_epoch)-1 
+        #Build graph
+        train_graph, cost_func, train_op, input_data, targets, lr, keep_prob, summary_length, max_sentence_length, text_length,summary_op = build_graph(word_to_int, 
+                embeddings, rnn_size, num_layers, batch_size)
+
+        cwd = os.getcwd()
+        checkpoint =os.path.join(cwd,"best_model_short.ckpt")
+
+        with tf.Session(graph = train_graph) as sess:
+            log_writer = tf.summary.FileWriter('./logs', train_graph)
+            sess.run(tf.global_variables_initializer())
+
+            for epoch_i in range(1, epochs + 1):
+                for batch_i, (summaries_batch, texts_batch, summaries_lengths, texts_lengths) in enumerate(get_batches(Y_train, X_train,batch_size, word_to_int)):
+                    start_time = time.time()
+                    log_summary,_, loss = sess.run([summary_op, train_op, cost_func], 
+                            {input_data:texts_batch, 
+                                targets:summaries_batch, 
+                                lr:learning_rate,
+                                summary_length:summaries_lengths,
+                                text_length:texts_lengths,
+                                keep_prob:keep_probability})
+            
+                    batch_loss  += loss 
+                    update_loss += loss
+                    end_time = time.time()
+                    batch_time = end_time - start_time
+
+                    if batch_i & display_step == 0 and batch_i > 0:
+                        print('Epoch {:>3}/{} Batch {:>4}/{} - Loss: {:>6.3f}, Seconds: {:>4.2f})'.format(epoch_i, 
+                            epochs, 
+                            batch_i, 
+                            len(X_train)//batch_size, 
+                            batch_loss/display_step, 
+                            batch_time*display_step))
+                        batch_loss = 0
+
+                        log_writer.add_summary(log_summary, batch_i)
                     
-                    update_loss = 0
-    
-                    # Reduce learning rate, but not below its minimum value
-            learning_rate *= 0.95 
-            if learning_rate < min_learning_rate:
-                learning_rate = min_learning_rate
+                    if batch_i & update_check == 0 and batch_i > 0:
+                        print("Average loss for this update:", round(update_loss/update_check,3))
+                        summary_update_loss.append(update_loss)
+
+
+                        #Save minimums
+                        if update_loss <= min(summary_update_loss):
+                            print("New Record!")
+                            stop_early = 0
+                            saver = tf.train.Saver()
+                            saver.save(sess, checkpoint)
+                        else:
+                            print("No Improvement.")
+                            stop_early += 1
+                            if stop_early == stop:
+                                break 
+                        
+                        update_loss = 0
         
-            if stop_early == stop:
-                print("Stopping Training.")
-                break 
+                #Reduce learning rate, but not below its minimum value
+                learning_rate *= 0.95 
+                if learning_rate < min_learning_rate:
+                    learning_rate = min_learning_rate
+            
+                if stop_early == stop:
+                    print("Stopping Training.")
+                    break 
+       
+       #Test with test data set after modeling
+        avg_summary_length = sum(summaries_lengths)//len(summaries_lengths)
+        y_sys = test_model(X_test, Y_test, './best_model.ckpt', train_graph,batch_size, avg_summary_length) # How do you test without knowing training batch_size
+        h_summaries = dh.convert_int_to_text(y_sys, int_to_word, word_to_int['<PAD>'])
+        rouge_scores = evalhelper.evaluate_rouge_score(h_summaries, summaries_test)
+        
+        for i in range(0, len(summaries_test)):
+            print('Auto summary: {}'.format(h_summaries[i]))
+            print()
+            print('Gold summary: {}'.format(summaries_test[i]))
+            print()
+        
+        print(rouge_scores)
+
+def test_model(X_test, y_test, model_cpk, test_graph, batch_size, avg_summary_length):
+
+    with tf.Session(graph = test_graph) as sess:
+        sess.run(tf.global_variables_initializer())
+        loader = tf.train.import_meta_graph(model_cpk + '.meta')
+        loader.restore(sess, model_cpk)
+
+        input_data = test_graph.get_tensor_by_name('inputs:0')
+        infer_logits = test_graph.get_tensor_by_name('predictions:0')
+        text_length = test_graph.get_tensor_by_name('text_sequence_length:0')
+        summary_length = test_graph.get_tensor_by_name('summary_sequence_length:0')
+        keep_prob = test_graph.get_tensor_by_name('keep_prob:0')
+        
+        y_sys = []
+
+        for x_ in X_test:
+            y_ = sess.run(infer_logits, {input_data: [x_]*batch_size,
+                summary_length:[avg_summary_length],
+                text_length:[len(x_)]*batch_size,
+                keep_prob: 1.0})[0]
+
+            y_sys.append(y_.tolist())
+        #compute accuracy measures
+
+    return y_sys 
+
+    
+    
+
+
 
 if __name__ == "__main__":
-    main()
-    
 
+    while True:
+        opt = input('Please select option below:\n\t1.Train \n\t2.Test\n\t3.Exit\n')
+        print('Selection option: {}'.format(opt))
+        if int(opt) == 1:
+            train_dir = input('Enter directory containing training files: ')
+            if not os.path.isdir(train_dir):
+                print('Directory: {} does not exist'.format(train_dir))
+                continue
+            num_files = int(input('Enter number of files to train(minimum = 200): '))
+            if num_files is None:
+                continue
+            batch_size = int(input('Enter batch size for training or <Enter> for default 32: '))
+
+            if batch_size is None or batch_size > num_files:
+                print('Batch size has to be less than number of files.')
+                batch_size = 32 #Try to find a better wayy
+            epochs = int(input('Enter number of epochs or <Enter> for default 60: '))
+
+            if epochs is None:
+                print('Using defaults for epochs 60')
+                epochs = 60
+            main(Test = False, file_loc = train_dir, n = num_files, batch_s = batch_size, epoch_n = epochs)    
+        elif int(opt) == 2:
+            test_dir = input('Enter directory containing testing files: ')
+            if not os.path.isdir(test_dir):
+                print('Directory: {} does not exist.'.format(test_dir))
+                continue
+            num_files = int(input('Enter number of files to test: '))
+            main(Test = True, file_loc = test_dir, n = num_files)
+        elif int(opt)== 3:
+            break
+        else:
+            print('Unknown option. Try again.')
         
